@@ -16,7 +16,7 @@ func NewCoverageGapHandler(service *service.CoverageGapService) *CoverageGapHand
 }
 func (h *CoverageGapHandler) List(c *gin.Context) {
 	page, size := pageQuery(c)
-	items, total, err := h.service.List(dto.CoverageGapQuery{SurveyAreaID: uintQuery(c, "survey_area_id"), State: cleanQuery(c, "state"), Severity: cleanQuery(c, "severity"), Page: page, PageSize: size})
+	items, total, err := h.service.List(dto.CoverageGapQuery{SurveyAreaID: uintQuery(c, "survey_area_id"), State: cleanQuery(c, "state"), Severity: cleanQuery(c, "severity"), Claim: cleanQuery(c, "claim"), Page: page, PageSize: size})
 	if err != nil {
 		writeServiceError(c, err, "覆盖缺口")
 		return
@@ -63,6 +63,40 @@ func (h *CoverageGapHandler) Transition(c *gin.Context) {
 		return
 	}
 	item, err := h.service.Transition(id, request, actorFrom(c))
+	if err != nil {
+		writeServiceError(c, err, "覆盖缺口")
+		return
+	}
+	api.Success(c, http.StatusOK, item)
+}
+func (h *CoverageGapHandler) Claim(c *gin.Context) {
+	id, ok := idParam(c)
+	if !ok {
+		return
+	}
+	var request dto.GapClaimRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		api.BindError(c, err)
+		return
+	}
+	item, err := h.service.Claim(id, request, actorFrom(c))
+	if err != nil {
+		writeServiceError(c, err, "覆盖缺口")
+		return
+	}
+	api.Success(c, http.StatusOK, item)
+}
+func (h *CoverageGapHandler) Release(c *gin.Context) {
+	id, ok := idParam(c)
+	if !ok {
+		return
+	}
+	var request dto.GapReleaseRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		api.BindError(c, err)
+		return
+	}
+	item, err := h.service.Release(id, request, actorFrom(c))
 	if err != nil {
 		writeServiceError(c, err, "覆盖缺口")
 		return

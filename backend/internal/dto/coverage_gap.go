@@ -13,10 +13,21 @@ type GapTransitionRequest struct {
 	ReviewNote      string `json:"review_note" binding:"required,min=8,max=600"`
 }
 
+type GapClaimRequest struct {
+	ExpectedVersion uint   `json:"expected_version" binding:"required,gt=0"`
+	ClaimNote       string `json:"claim_note" binding:"omitempty,max=300"`
+}
+
+type GapReleaseRequest struct {
+	ExpectedVersion uint   `json:"expected_version" binding:"required,gt=0"`
+	Reason          string `json:"reason" binding:"required,min=4,max=600"`
+}
+
 type CoverageGapQuery struct {
 	SurveyAreaID uint
 	State        string
 	Severity     string
+	Claim        string
 	Page         int
 	PageSize     int
 }

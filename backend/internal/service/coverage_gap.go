@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -84,6 +86,11 @@ func (s *CoverageGapService) Detect(request dto.DetectCoverageRequest, idempoten
 	}
 	hash := geometry.StableInputHash(area.ID, area.CoordinateSystem, request.AlgorithmVersion, checksums, resolution)
 	if existing, lookupErr := s.repository.ByInputHash(hash); lookupErr == nil {
+		// 相同输入幂等返回历史快照，保留已有认领与复核进度，不重新计算也不覆盖
+		existing, getErr := s.Get(existing.ID)
+		if getErr != nil {
+			return CoverageResultView{}, getErr
+		}
 		return CoverageResultView{Gap: existing, Evidence: evidenceFromGap(existing, area.CoordinateSystem, len(runs)), Idempotent: true}, nil
 	} else if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
 		return CoverageResultView{}, lookupErr
@@ -99,7 +106,9 @@ func (s *CoverageGapService) Detect(request dto.DetectCoverageRequest, idempoten
 	}
 	ids, _ := json.Marshal(uniqueIDs(request.SourceRunIDs))
 	elapsed := time.Since(started).Milliseconds()
-	item := model.CoverageGap{SurveyAreaID: area.ID, SourceRunIDs: ids, GapGeoJSON: result.GapGeoJSON, AreaSquareM: result.AreaSquareM * result.GapRatio, GapRatio: result.GapRatio, Severity: string(constants.SeverityForRatio(result.GapRatio)), RecommendedLineGeoJSON: result.RecommendedGeoJSON, AlgorithmVersion: request.AlgorithmVersion, InputHash: hash, GapState: string(constants.GapDetected), Explanation: fmt.Sprintf("以 %.1f 米网格分析 %d 个单元；过滤 %d 个低于分辨率阈值的碎片。补测线仅供人工规划参考。", resolution, result.SampleCells, result.FilteredFragments), CoverageRatio: result.CoverageRatio, OverlapRatio: result.OverlapRatio, ProcessingMillis: elapsed, Version: 1, DetectedAt: time.Now().UTC()}
+	severity := constants.SeverityForRatio(result.GapRatio)
+	detectedAt := time.Now().UTC()
+	item := model.CoverageGap{SurveyAreaID: area.ID, SourceRunIDs: ids, GapGeoJSON: result.GapGeoJSON, AreaSquareM: result.AreaSquareM * result.GapRatio, GapRatio: result.GapRatio, Severity: string(severity), RecommendedLineGeoJSON: result.RecommendedGeoJSON, AlgorithmVersion: request.AlgorithmVersion, InputHash: hash, GapState: string(constants.GapDetected), Explanation: fmt.Sprintf("以 %.1f 米网格分析 %d 个单元；过滤 %d 个低于分辨率阈值的碎片。补测线仅供人工规划参考。", resolution, result.SampleCells, result.FilteredFragments), CoverageRatio: result.CoverageRatio, OverlapRatio: result.OverlapRatio, ProcessingMillis: elapsed, Version: 1, DetectedAt: detectedAt, DeadlineAt: detectedAt.Add(constants.GapDeadline(severity))}
 	if err := s.repository.Create(&item); err != nil {
 		return CoverageResultView{}, mapDatabaseError(err, "覆盖输入")
 	}
@@ -110,10 +119,61 @@ func (s *CoverageGapService) Detect(request dto.DetectCoverageRequest, idempoten
 	return CoverageResultView{Gap: item, Evidence: evidence}, nil
 }
 
+func (s *CoverageGapService) Claim(id uint, request dto.GapClaimRequest, actor Actor) (model.CoverageGap, error) {
+	before, err := s.Get(id)
+	if err != nil {
+		return model.CoverageGap{}, err
+	}
+	if before.GapState == string(constants.GapClosed) {
+		return model.CoverageGap{}, api.Conflict("GAP_CLAIM_INVALID", "已关闭的缺口不能认领", nil)
+	}
+	if before.ClaimedByID != nil {
+		return model.CoverageGap{}, api.Conflict("GAP_ALREADY_CLAIMED", "缺口已被认领，同一缺口只能认领一次", nil)
+	}
+	updated, err := s.repository.Claim(id, request.ExpectedVersion, actor.UserID, strings.TrimSpace(request.ClaimNote), time.Now().UTC())
+	if err != nil {
+		return updated, mapDatabaseError(err, "覆盖缺口")
+	}
+	if err := s.audit.Record(actor, "coverage.claim", "coverage_gap", id, before, updated, map[string]any{"claim_note": request.ClaimNote, "deadline_at": updated.DeadlineAt}); err != nil {
+		return updated, err
+	}
+	return updated, nil
+}
+
+func (s *CoverageGapService) Release(id uint, request dto.GapReleaseRequest, actor Actor) (model.CoverageGap, error) {
+	before, err := s.Get(id)
+	if err != nil {
+		return model.CoverageGap{}, err
+	}
+	if before.GapState == string(constants.GapClosed) {
+		return model.CoverageGap{}, api.Conflict("GAP_RELEASE_INVALID", "已关闭的缺口不能退回", nil)
+	}
+	if before.ClaimedByID == nil {
+		return model.CoverageGap{}, api.Conflict("GAP_NOT_CLAIMED", "缺口尚未认领，无需退回", nil)
+	}
+	if *before.ClaimedByID != actor.UserID {
+		return model.CoverageGap{}, api.NewError(http.StatusForbidden, "GAP_CLAIM_FORBIDDEN", "只有认领人才能退回该缺口", nil)
+	}
+	updated, err := s.repository.Release(id, request.ExpectedVersion, actor.UserID)
+	if err != nil {
+		return updated, mapDatabaseError(err, "覆盖缺口")
+	}
+	if err := s.audit.Record(actor, "coverage.release", "coverage_gap", id, before, updated, map[string]any{"reason": request.Reason}); err != nil {
+		return updated, err
+	}
+	return updated, nil
+}
+
 func (s *CoverageGapService) Transition(id uint, request dto.GapTransitionRequest, actor Actor) (model.CoverageGap, error) {
 	before, err := s.Get(id)
 	if err != nil {
 		return model.CoverageGap{}, err
+	}
+	if before.ClaimedByID == nil {
+		return model.CoverageGap{}, api.Conflict("GAP_CLAIM_REQUIRED", "缺口尚未认领，认领后才能推进状态", nil)
+	}
+	if *before.ClaimedByID != actor.UserID {
+		return model.CoverageGap{}, api.NewError(http.StatusForbidden, "GAP_CLAIM_FORBIDDEN", "只有认领人才能推进缺口状态", nil)
 	}
 	from, err := constants.ParseGapState(before.GapState)
 	if err != nil {
@@ -127,7 +187,7 @@ func (s *CoverageGapService) Transition(id uint, request dto.GapTransitionReques
 		return model.CoverageGap{}, api.Conflict("GAP_TRANSITION_INVALID", fmt.Sprintf("不能从 %s 迁移到 %s", from, target), nil)
 	}
 	explanation := before.Explanation + " 复核记录：" + request.ReviewNote
-	updated, err := s.repository.Transition(id, request.ExpectedVersion, before.GapState, request.TargetState, explanation)
+	updated, err := s.repository.Transition(id, request.ExpectedVersion, before.GapState, request.TargetState, explanation, actor.UserID)
 	if err != nil {
 		return updated, mapDatabaseError(err, "覆盖缺口")
 	}

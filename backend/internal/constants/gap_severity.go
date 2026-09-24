@@ -1,6 +1,9 @@
 package constants
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type GapSeverity string
 type GapState string
@@ -57,5 +60,17 @@ func SeverityForRatio(ratio float64) GapSeverity {
 		return SeverityMajor
 	default:
 		return SeverityMinor
+	}
+}
+
+// GapDeadline 返回缺口复核期限：严重 4 小时、主要 1 天、轻微 3 天，自检测时间起算。
+func GapDeadline(severity GapSeverity) time.Duration {
+	switch severity {
+	case SeverityCritical:
+		return 4 * time.Hour
+	case SeverityMajor:
+		return 24 * time.Hour
+	default:
+		return 72 * time.Hour
 	}
 }

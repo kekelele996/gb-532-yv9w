@@ -73,6 +73,9 @@ func OpenDatabase(config Config) (*gorm.DB, error) {
 		if err := db.AutoMigrate(&model.User{}, &model.SurveyArea{}, &model.TransectPlan{}, &model.SonarRun{}, &model.CoverageGap{}, &model.AuditEvent{}); err != nil {
 			return nil, fmt.Errorf("migrate database: %w", err)
 		}
+		if err := backfillGapDeadlines(db, config.DBDriver); err != nil {
+			return nil, fmt.Errorf("backfill gap deadlines: %w", err)
+		}
 	}
 	if config.SeedData {
 		if err := seed(db); err != nil {
@@ -80,6 +83,24 @@ func OpenDatabase(config Config) (*gorm.DB, error) {
 		}
 	}
 	return db, nil
+}
+
+// backfillGapDeadlines 为迁移前已存在的缺口补齐复核期限：严重 4 小时、主要 1 天、轻微 3 天，自检测时间起算。
+// 该回填是确定性的，重复执行结果一致，不影响运行期新检测的缺口。
+func backfillGapDeadlines(db *gorm.DB, driver string) error {
+	hours := map[constants.GapSeverity]int{constants.SeverityCritical: 4, constants.SeverityMajor: 24, constants.SeverityMinor: 72}
+	for severity, shift := range hours {
+		var result *gorm.DB
+		if driver == "sqlite" {
+			result = db.Exec(fmt.Sprintf("UPDATE coverage_gaps SET deadline_at = strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ', detected_at, '+%d hours') WHERE severity = ? AND (deadline_at IS NULL OR deadline_at = '')", shift), string(severity))
+		} else {
+			result = db.Exec(fmt.Sprintf("UPDATE coverage_gaps SET deadline_at = detected_at + interval '%d hours' WHERE severity = ? AND deadline_at IS NULL", shift), string(severity))
+		}
+		if result.Error != nil {
+			return fmt.Errorf("backfill %s gaps: %w", severity, result.Error)
+		}
+	}
+	return nil
 }
 
 func seed(db *gorm.DB) error {

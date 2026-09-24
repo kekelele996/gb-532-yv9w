@@ -12,6 +12,7 @@ docker compose up -d --build
 - 测线：从测区生成平行测线，锁定执行版本，复制形成后续草稿。
 - 航迹：导入 GeoJSON，检查采样点、长度、航速与导航质量，按状态机处理。
 - 覆盖：以固定网格估算覆盖、重复覆盖和漏测，冻结输入哈希并生成补测线建议。
+- 缺口队列：按严重度设复核期限（严重 4 小时、主要 1 天、轻微 3 天），待认领缺口按剩余时间升序排列；复核员先到先得认领，仅认领人可推进状态，可退回待认领，认领与退回均留审计记录；相同输入重新检测不覆盖已有认领。
 - 审计：记录四类实体写操作的前后快照、操作者、角色、request ID 和算法元数据。
 
 ## 角色与账号
@@ -26,7 +27,7 @@ docker compose up -d --build
 | `reviewer` | `reviewer` | 覆盖缺口人工复核与审计读取 |
 | `auditor` | `auditor` | 全局只读与审计读取 |
 
-审计员在数据库角色、JWT claims、Gin RBAC、React 路由和按钮层均为只读。只有 `reviewer` 可以推进缺口复核状态。
+审计员在数据库角色、JWT claims、Gin RBAC、React 路由和按钮层均为只读。只有 `reviewer` 可以认领缺口；认领人才能推进缺口复核状态或退回待认领。
 
 ## 页面
 
@@ -35,7 +36,7 @@ docker compose up -d --build
 | `/areas` | SurveyArea、TransectPlan | 创建投影测区、查看覆盖摘要和边界 |
 | `/plans` | TransectPlan、SurveyArea | 生成平行测线、锁定或复制版本 |
 | `/runs` | SonarRun、TransectPlan | 导入航迹、读取质量证据、推进处理状态 |
-| `/coverage` | CoverageGap、SonarRun、SurveyArea | 计算覆盖、查看缺口与补测线、人工复核 |
+| `/coverage` | CoverageGap、SonarRun、SurveyArea | 计算覆盖、查看缺口与补测线、按剩余期限认领并人工复核 |
 | `/audit` | 四实体审计投影 | 按 request ID、实体和操作者筛选 |
 
 所有页面通过 `/api/v1` 读取真实数据。二维测绘画布使用本地 Canvas，不依赖在线地图或第三方瓦片服务。
@@ -88,9 +89,11 @@ database/init.sql        PostGIS 扩展初始化
 | POST | `/runs/import` | 导入航迹，按 checksum 幂等 |
 | GET | `/runs/:id/quality` | 航迹质量证据 |
 | POST | `/runs/:id/transition` | 推进运行状态机 |
-| GET | `/coverage-gaps`、`/coverage-gaps/:id` | 缺口快照列表与详情 |
-| POST | `/coverage-gaps/detect` | 覆盖计算，要求 `Idempotency-Key` |
-| POST | `/coverage-gaps/:id/transition` | reviewer 人工复核 |
+| GET | `/coverage-gaps`、`/coverage-gaps/:id` | 缺口快照列表（支持 `claim=unclaimed|claimed` 筛选，待认领按剩余期限升序）与详情 |
+| POST | `/coverage-gaps/detect` | 覆盖计算，要求 `Idempotency-Key`；相同输入幂等返回历史快照且不覆盖已有认领 |
+| POST | `/coverage-gaps/:id/claim` | reviewer 先到先得认领（乐观锁 `expected_version`），成功版本号 +1 |
+| POST | `/coverage-gaps/:id/release` | 仅认领人可退回待认领，记录退回原因审计 |
+| POST | `/coverage-gaps/:id/transition` | reviewer 人工复核，仅该缺口的认领人可推进 |
 | GET | `/audits` | 审计筛选 |
 
 错误响应统一包含业务 `code`、`message`、可选 `details` 和 `request_id`。无效 GeoJSON/坐标系返回 422，非法状态或版本冲突返回 409，认证与权限分别返回 401/403。
@@ -102,10 +105,10 @@ database/init.sql        PostGIS 扩展初始化
 - 后端：`internal/constants/run_state.go`；`model/sonar_run.go`；`dto/sonar_run.go`；`service/sonar_run.go` 状态机；`handler/sonar_run.go`；`router/router.go`；`constants/state_test.go`。
 - 前端：`types/enums/run-state.ts`；`types/sonar-run.ts`；`stores/sonar-run-store.ts`；`components/common/RunStateBadge.tsx`；`pages/RunsPage.tsx`、`pages/CoveragePage.tsx`；`utils/state.test.ts`。
 
-`GapSeverity = minor | major | critical`
+`GapSeverity = minor | major | critical`，复核期限分别为轻微 3 天、主要 1 天、严重 4 小时（自检测时间起算）
 
-- 后端：`internal/constants/gap_severity.go`；`model/coverage_gap.go`；`dto/coverage_gap.go`；`service/coverage_gap.go`；`handler/coverage_gap.go`；`constants/state_test.go`。
-- 前端：`types/enums/gap-severity.ts`；`types/coverage-gap.ts`；`stores/coverage-gap-store.ts`；`pages/CoveragePage.tsx`；`utils/state.test.ts`。
+- 后端：`internal/constants/gap_severity.go`（`GapDeadline`）；`model/coverage_gap.go`（`deadline_at`、`claimed_by_id`、`claimed_at`、`claim_note`）；`dto/coverage_gap.go`；`repository/coverage_gap.go`（剩余时间排序与条件更新）；`service/coverage_gap.go`（认领/退回/状态推进与审计）；`handler/coverage_gap.go`；`router/router.go`；`constants/state_test.go`、`service/coverage_gap_test.go`。
+- 前端：`types/enums/gap-severity.ts`（`GAP_SLA_LABEL`）；`types/coverage-gap.ts`；`stores/coverage-gap-store.ts`；`pages/CoveragePage.tsx`；`utils/deadline.ts` 与 `utils/deadline.test.ts`；`utils/state.test.ts`。
 
 ## 坐标与算法边界
 
@@ -182,6 +185,9 @@ docker compose down -v --remove-orphans
 - `VERSION_CONFLICT`：数据已被其他人员更新，刷新列表后按新版本重试。
 - `RUN_TRANSITION_INVALID`：必须依次完成质量检查、处理和已处理状态。
 - `RUN_NOT_PROCESSED`：覆盖计算只能选择已处理且属于同一测区的运行。
+- `GAP_ALREADY_CLAIMED`：缺口先到先得，已被其他复核员认领；待其退回待认领后才能再次认领。
+- `GAP_CLAIM_REQUIRED`：缺口尚未认领，认领后才能推进复核状态。
+- `GAP_CLAIM_FORBIDDEN`：只有当前认领人才能推进状态或退回该缺口。
 - npm 默认镜像无法下载或审计：显式使用 `--registry=https://registry.npmjs.org --replace-registry-host=always`。
 
 ## License

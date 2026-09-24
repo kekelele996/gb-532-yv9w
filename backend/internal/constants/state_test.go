@@ -1,6 +1,9 @@
 package constants
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestRunStateTransitions(t *testing.T) {
 	valid := [][2]RunState{{RunImported, RunQualityChecked}, {RunQualityChecked, RunProcessing}, {RunProcessing, RunProcessed}, {RunProcessed, RunSuperseded}}
@@ -26,5 +29,21 @@ func TestGapStateAndSeverity(t *testing.T) {
 	}
 	if SeverityForRatio(0.13) != SeverityCritical || SeverityForRatio(0.07) != SeverityMajor || SeverityForRatio(0.01) != SeverityMinor {
 		t.Fatal("severity thresholds are inconsistent")
+	}
+}
+
+func TestGapDeadlines(t *testing.T) {
+	cases := []struct {
+		severity GapSeverity
+		want     time.Duration
+	}{
+		{SeverityCritical, 4 * time.Hour},
+		{SeverityMajor, 24 * time.Hour},
+		{SeverityMinor, 72 * time.Hour},
+	}
+	for _, tc := range cases {
+		if got := GapDeadline(tc.severity); got != tc.want {
+			t.Errorf("%s deadline = %s, want %s", tc.severity, got, tc.want)
+		}
 	}
 }

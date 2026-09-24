@@ -24,8 +24,13 @@ type CoverageGap struct {
 	ProcessingMillis       int64          `json:"processing_millis" gorm:"not null"`
 	Version                uint           `json:"version" gorm:"not null;default:1"`
 	DetectedAt             time.Time      `json:"detected_at" gorm:"not null"`
+	DeadlineAt             time.Time      `json:"deadline_at" gorm:"index"`
+	ClaimedByID            *uint          `json:"claimed_by_id" gorm:"index"`
+	ClaimedAt              *time.Time     `json:"claimed_at"`
+	ClaimNote              string         `json:"claim_note" gorm:"size:300;not null;default:''"`
 	UpdatedAt              time.Time      `json:"updated_at"`
 	SurveyArea             *SurveyArea    `json:"survey_area,omitempty" gorm:"foreignKey:SurveyAreaID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
+	ClaimedBy              *User          `json:"claimed_by,omitempty" gorm:"foreignKey:ClaimedByID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
 }
 
 func (CoverageGap) TableName() string { return "coverage_gaps" }
