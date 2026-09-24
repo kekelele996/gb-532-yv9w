@@ -11,7 +11,7 @@ docker compose up -d --build
 - 测区：创建、校验米制投影边界，查看规划、运行和覆盖摘要。
 - 测线：从测区生成平行测线，锁定执行版本，复制形成后续草稿。
 - 航迹：导入 GeoJSON，检查采样点、长度、航速与导航质量，按状态机处理。
-- 覆盖：以固定网格估算覆盖、重复覆盖和漏测，冻结输入哈希并生成补测线建议。
+- 覆盖：以固定网格估算覆盖、重复覆盖和漏测，冻结输入哈希并生成补测线建议；按严重度设定期限（严重 4 小时、主要 1 天、轻微 3 天），复核员先到先得认领后才能推进状态，也可退回待认领池。
 - 审计：记录四类实体写操作的前后快照、操作者、角色、request ID 和算法元数据。
 
 ## 角色与账号
@@ -23,7 +23,7 @@ docker compose up -d --build
 | `admin` | `admin` | 测区、规划、航迹和覆盖计算管理 |
 | `planner` | `survey_planner` | 测区与测线规划 |
 | `processor` | `data_processor` | 航迹导入、处理和覆盖计算 |
-| `reviewer` | `reviewer` | 覆盖缺口人工复核与审计读取 |
+| `reviewer` | `reviewer` | 覆盖缺口认领/退回与人工复核、审计读取 |
 | `auditor` | `auditor` | 全局只读与审计读取 |
 
 审计员在数据库角色、JWT claims、Gin RBAC、React 路由和按钮层均为只读。只有 `reviewer` 可以推进缺口复核状态。
@@ -88,12 +88,24 @@ database/init.sql        PostGIS 扩展初始化
 | POST | `/runs/import` | 导入航迹，按 checksum 幂等 |
 | GET | `/runs/:id/quality` | 航迹质量证据 |
 | POST | `/runs/:id/transition` | 推进运行状态机 |
-| GET | `/coverage-gaps`、`/coverage-gaps/:id` | 缺口快照列表与详情 |
+| GET | `/coverage-gaps`、`/coverage-gaps/:id` | 缺口快照列表与详情，支持 `claim=unclaimed|mine` |
 | POST | `/coverage-gaps/detect` | 覆盖计算，要求 `Idempotency-Key` |
-| POST | `/coverage-gaps/:id/transition` | reviewer 人工复核 |
+| POST | `/coverage-gaps/:id/claim` | reviewer 先到先得认领待复核缺口 |
+| POST | `/coverage-gaps/:id/release` | 认领人把缺口退回待认领池 |
+| POST | `/coverage-gaps/:id/transition` | 认领人推进人工复核状态 |
 | GET | `/audits` | 审计筛选 |
 
 错误响应统一包含业务 `code`、`message`、可选 `details` 和 `request_id`。无效 GeoJSON/坐标系返回 422，非法状态或版本冲突返回 409，认证与权限分别返回 401/403。
+
+## 缺口认领与复核期限
+
+检测生成缺口时按严重度写入 `due_at`：严重（critical）4 小时、主要（major）1 天、轻微（minor）3 天，自 `detected_at` 起算。
+
+- `GET /coverage-gaps?claim=unclaimed` 返回待认领池（未认领且未关闭），按剩余期限升序，越接近超期越靠前；`claim=mine` 返回当前复核员已认领的缺口。
+- 认领为条件更新（`assignee_id IS NULL` 才成功），天然先到先得；同一缺口重复认领返回 409 `GAP_ALREADY_CLAIMED`，关闭缺口返回 `GAP_CLOSED`。
+- 只有认领人可以推进复核状态或退回待认领，其他复核员得到 403；退回清空认领关系并回到待认领池，可携带退回原因。
+- 认领（`coverage.claim`）与退回（`coverage.release`）均写审计事件，包含前后快照。
+- 相同输入重新计算命中 `input_hash` 幂等路径，直接返回既有缺口，不覆盖认领人、状态或版本。
 
 ## 共享枚举位置
 

@@ -13,12 +13,26 @@ type GapTransitionRequest struct {
 	ReviewNote      string `json:"review_note" binding:"required,min=8,max=600"`
 }
 
+// GapClaimRequest 认领支持空请求体；ExpectedVersion 大于 0 时做乐观锁校验。
+type GapClaimRequest struct {
+	ExpectedVersion uint `json:"expected_version" binding:"omitempty,gte=0"`
+}
+
+// GapReleaseRequest 认领人把缺口退回待认领池，note 为可选退回原因。
+type GapReleaseRequest struct {
+	ExpectedVersion uint   `json:"expected_version" binding:"omitempty,gte=0"`
+	Note            string `json:"note" binding:"omitempty,max=600"`
+}
+
 type CoverageGapQuery struct {
 	SurveyAreaID uint
 	State        string
 	Severity     string
-	Page         int
-	PageSize     int
+	// Unclaimed=true 只看待认领；AssigneeID>0 只看指定复核员；AssigneeID 与 Unclaimed 互斥。
+	Unclaimed  bool
+	AssigneeID uint
+	Page       int
+	PageSize   int
 }
 
 type CoverageEvidence struct {

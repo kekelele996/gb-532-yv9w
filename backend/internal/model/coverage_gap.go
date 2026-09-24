@@ -23,9 +23,13 @@ type CoverageGap struct {
 	OverlapRatio           float64        `json:"overlap_ratio" gorm:"not null"`
 	ProcessingMillis       int64          `json:"processing_millis" gorm:"not null"`
 	Version                uint           `json:"version" gorm:"not null;default:1"`
+	DueAt                  *time.Time     `json:"due_at" gorm:"column:due_at;index"`
+	AssigneeID             *uint          `json:"assignee_id" gorm:"column:assignee_id;index"`
+	ClaimedAt              *time.Time     `json:"claimed_at" gorm:"column:claimed_at"`
 	DetectedAt             time.Time      `json:"detected_at" gorm:"not null"`
 	UpdatedAt              time.Time      `json:"updated_at"`
 	SurveyArea             *SurveyArea    `json:"survey_area,omitempty" gorm:"foreignKey:SurveyAreaID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
+	Assignee               *User          `json:"assignee,omitempty" gorm:"foreignKey:AssigneeID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
 }
 
 func (CoverageGap) TableName() string { return "coverage_gaps" }

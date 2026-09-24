@@ -1,6 +1,9 @@
 package constants
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type GapSeverity string
 type GapState string
@@ -17,6 +20,18 @@ const (
 	GapResurveyed    GapState = "resurveyed"
 	GapClosed        GapState = "closed"
 )
+
+// GapReviewDeadline 定义各严重度缺口的认领/复核期限：严重 4 小时、主要 1 天、轻微 3 天。
+var GapReviewDeadline = map[GapSeverity]time.Duration{
+	SeverityCritical: 4 * time.Hour,
+	SeverityMajor:    24 * time.Hour,
+	SeverityMinor:    72 * time.Hour,
+}
+
+// ReviewDeadlineFor 返回缺口在 detectedAt 之后的复核截止时间。
+func ReviewDeadlineFor(severity GapSeverity, detectedAt time.Time) time.Time {
+	return detectedAt.Add(GapReviewDeadline[severity])
+}
 
 var gapTransitions = map[GapState]map[GapState]struct{}{
 	GapDetected:      {GapReviewed: {}},

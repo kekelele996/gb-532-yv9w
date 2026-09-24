@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -99,7 +100,10 @@ func (s *CoverageGapService) Detect(request dto.DetectCoverageRequest, idempoten
 	}
 	ids, _ := json.Marshal(uniqueIDs(request.SourceRunIDs))
 	elapsed := time.Since(started).Milliseconds()
-	item := model.CoverageGap{SurveyAreaID: area.ID, SourceRunIDs: ids, GapGeoJSON: result.GapGeoJSON, AreaSquareM: result.AreaSquareM * result.GapRatio, GapRatio: result.GapRatio, Severity: string(constants.SeverityForRatio(result.GapRatio)), RecommendedLineGeoJSON: result.RecommendedGeoJSON, AlgorithmVersion: request.AlgorithmVersion, InputHash: hash, GapState: string(constants.GapDetected), Explanation: fmt.Sprintf("以 %.1f 米网格分析 %d 个单元；过滤 %d 个低于分辨率阈值的碎片。补测线仅供人工规划参考。", resolution, result.SampleCells, result.FilteredFragments), CoverageRatio: result.CoverageRatio, OverlapRatio: result.OverlapRatio, ProcessingMillis: elapsed, Version: 1, DetectedAt: time.Now().UTC()}
+	detectedAt := time.Now().UTC()
+	severity := constants.SeverityForRatio(result.GapRatio)
+	dueAt := constants.ReviewDeadlineFor(severity, detectedAt)
+	item := model.CoverageGap{SurveyAreaID: area.ID, SourceRunIDs: ids, GapGeoJSON: result.GapGeoJSON, AreaSquareM: result.AreaSquareM * result.GapRatio, GapRatio: result.GapRatio, Severity: string(severity), RecommendedLineGeoJSON: result.RecommendedGeoJSON, AlgorithmVersion: request.AlgorithmVersion, InputHash: hash, GapState: string(constants.GapDetected), Explanation: fmt.Sprintf("以 %.1f 米网格分析 %d 个单元；过滤 %d 个低于分辨率阈值的碎片。补测线仅供人工规划参考。", resolution, result.SampleCells, result.FilteredFragments), CoverageRatio: result.CoverageRatio, OverlapRatio: result.OverlapRatio, ProcessingMillis: elapsed, Version: 1, DueAt: &dueAt, DetectedAt: detectedAt}
 	if err := s.repository.Create(&item); err != nil {
 		return CoverageResultView{}, mapDatabaseError(err, "覆盖输入")
 	}
@@ -110,10 +114,64 @@ func (s *CoverageGapService) Detect(request dto.DetectCoverageRequest, idempoten
 	return CoverageResultView{Gap: item, Evidence: evidence}, nil
 }
 
+func (s *CoverageGapService) Claim(id uint, expectedVersion uint, actor Actor) (model.CoverageGap, error) {
+	before, err := s.Get(id)
+	if err != nil {
+		return model.CoverageGap{}, err
+	}
+	if before.GapState == string(constants.GapClosed) {
+		return model.CoverageGap{}, api.Conflict("GAP_CLOSED", "缺口已关闭，无需认领", nil)
+	}
+	if before.AssigneeID != nil {
+		return model.CoverageGap{}, api.Conflict("GAP_ALREADY_CLAIMED", "该缺口已被其他复核员认领", nil)
+	}
+	updated, err := s.repository.Claim(id, expectedVersion, actor.UserID, time.Now().UTC())
+	if err != nil {
+		if errors.Is(err, repository.ErrVersionConflict) {
+			return model.CoverageGap{}, api.Conflict("GAP_ALREADY_CLAIMED", "该缺口已被其他复核员认领或版本已变化", err)
+		}
+		return updated, mapDatabaseError(err, "覆盖缺口")
+	}
+	if err := s.audit.Record(actor, "coverage.claim", "coverage_gap", id, before, updated, map[string]any{"expected_version": expectedVersion}); err != nil {
+		return updated, err
+	}
+	return updated, nil
+}
+
+func (s *CoverageGapService) Release(id uint, expectedVersion uint, note string, actor Actor) (model.CoverageGap, error) {
+	before, err := s.Get(id)
+	if err != nil {
+		return model.CoverageGap{}, err
+	}
+	if before.AssigneeID == nil {
+		return model.CoverageGap{}, api.Conflict("GAP_NOT_CLAIMED", "该缺口当前未被认领", nil)
+	}
+	if *before.AssigneeID != actor.UserID {
+		return model.CoverageGap{}, api.Forbidden("只有认领人可以退回该缺口")
+	}
+	updated, err := s.repository.Release(id, expectedVersion, actor.UserID, strings.TrimSpace(note))
+	if err != nil {
+		if errors.Is(err, repository.ErrVersionConflict) {
+			return model.CoverageGap{}, api.Conflict("GAP_VERSION_CONFLICT", "缺口版本已变化或认领关系已改变，刷新后重试", err)
+		}
+		return updated, mapDatabaseError(err, "覆盖缺口")
+	}
+	if err := s.audit.Record(actor, "coverage.release", "coverage_gap", id, before, updated, map[string]any{"expected_version": expectedVersion, "note": strings.TrimSpace(note)}); err != nil {
+		return updated, err
+	}
+	return updated, nil
+}
+
 func (s *CoverageGapService) Transition(id uint, request dto.GapTransitionRequest, actor Actor) (model.CoverageGap, error) {
 	before, err := s.Get(id)
 	if err != nil {
 		return model.CoverageGap{}, err
+	}
+	if before.AssigneeID == nil {
+		return model.CoverageGap{}, api.Conflict("GAP_NOT_CLAIMED", "请先认领缺口再推进复核状态", nil)
+	}
+	if *before.AssigneeID != actor.UserID {
+		return model.CoverageGap{}, api.Forbidden("只有认领人可以推进该缺口的复核状态")
 	}
 	from, err := constants.ParseGapState(before.GapState)
 	if err != nil {
